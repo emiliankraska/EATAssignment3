@@ -54,6 +54,7 @@ simRConvTb = undefined
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
 
+
 conv1D ::
   (KnownNat a, SaturatingNum n) =>
   (Vec a n, Vec a n) -> -- STATE: Current kernel and image
@@ -64,15 +65,15 @@ conv1D ::
 conv1D (kernel, subImg) (state, input) =
   case state of
     LOAD_KERNEL ->
-      let newKernel = input :> init kernel
+      let newKernel = kernel <<+ input
       in ((newKernel, subImg), 0)
 
     LOAD_SUBIMG ->
-      let newSubImg = input :> init subImg
+      let newSubImg = subImg <<+ input
       in ((kernel, newSubImg), 0)
 
     CONV ->
-      let newSubImg = input :> init subImg
+      let newSubImg = subImg <<+ input
           result = conv kernel newSubImg
       in ((kernel, newSubImg), result)
 
