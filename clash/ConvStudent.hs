@@ -46,22 +46,13 @@ rConv vec1 vec2 = register 0 (conv <$> vec1 <*> vec2)
 -----------------------------------------------------------------------------------------
 -- Simulation of rConv
 
-rConvTb ::
-  forall dom a n.
-  (HiddenClockResetEnable dom, KnownNat a, NFDataX n, SaturatingNum n) =>
-  (Signal dom Vec n (a, a)) ->
-  Signal dom n
-rConvTb bvec =
-  let (vec1, vec2) = unbundle bvec
-   in rConv vec1 vec2
+rConvTb = undefined
 
-simRConvTb = simulate @System rConvTb (Prelude.zip [1, 2, 3, 4] [2, 3, 4, 5])
+simRConvTb :: [Signed 16]
+simRConvTb = undefined
 
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
-
-data ConvState = LOAD_KERNEL | LOAD_SUBIMG | CONV | CONV_NO_PIPE
-deriving (Show, Generic, NFDataX, Eq)
 
 conv1D ::
   (KnownNat a, SaturatingNum n) =>
@@ -70,7 +61,6 @@ conv1D ::
   ( (Vec a n, Vec a n), -- STATE': New kernel and image
     n -- OUTPUT: Convolved feature
   )
-conv1D (kernel, subImg) (state, input) =
 conv1D (kernel, subImg) (state, input) =
   case state of
     LOAD_KERNEL ->
@@ -99,7 +89,20 @@ conv1D' ::
   ( (ConvState, Index a, Vec a n, Vec a n), -- STATE': new ConvState, counter, kernel and image
     n -- OUTPUT: Convolved feature
   )
-conv1D' = undefined
+conv1D' (state, counter, kernel, subImg) input =
+  let
+    ((newKernel, newSubImg), out) = conv1D (kernel, subImg) (state, input)
+    counter' = succ counter
+
+    -- check for end of 8-cycle period
+    (nextState, nextCounter) =
+      case state of
+        LOAD_KERNEL  -> if counter == maxBound then (LOAD_SUBIMG, 0)  else (state, counter')
+        LOAD_SUBIMG  -> if counter == maxBound then (CONV, 0)         else (state, counter')
+        CONV         -> if counter == maxBound then (LOAD_SUBIMG, 0)  else (state, counter')
+        _            -> (LOAD_KERNEL, 0)
+  in
+    ((nextState, nextCounter, newKernel, newSubImg), out)
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simConv1DTbPrint' to print out all the iner stages of the states
