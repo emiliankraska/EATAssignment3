@@ -46,10 +46,22 @@ rConv vec1 vec2 = register 0 (conv <$> vec1 <*> vec2)
 -----------------------------------------------------------------------------------------
 -- Simulation of rConv
 
-rConvTb = undefined
+rConvTb ::
+  forall dom a n.
+  (HiddenClockResetEnable dom, KnownNat a, NFDataX n, SaturatingNum n) =>
+  (Signal dom (Vec a n, Vec a n)) ->
+  Signal dom n
+rConvTb bvec =
+  let (vec1, vec2) = unbundle bvec
+   in rConv vec1 vec2
 
-simRConvTb :: [Signed 16]
-simRConvTb = undefined
+simRConvTb = simulate @System rConvTb testInput
+
+testInput =
+  [ (1 :> 2 :> Nil, 3 :> 4 :> Nil),
+    (5 :> 6 :> Nil, 7 :> 8 :> Nil),
+    (9 :> 10 :> Nil, 11 :> 12 :> Nil)
+  ]
 
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
@@ -75,10 +87,8 @@ conv1D (kernel, subImg) (state, input) =
     CONV ->
       let newSubImg = subImg <<+ input
           result = conv kernel newSubImg
-      in ((kernel, newSubImg), result)
-
-    _ -> ((kernel, subImg), 0)  -- default for future states
-
+       in ((kernel, newSubImg), result)
+    _ -> ((kernel, subImg), 0) -- default for future states
 
 -----------------------------------------------------------------------------------------
 -- Testing the conv1D function
@@ -91,19 +101,17 @@ conv1D' ::
     n -- OUTPUT: Convolved feature
   )
 conv1D' (state, counter, kernel, subImg) input =
-  let
-    ((newKernel, newSubImg), out) = conv1D (kernel, subImg) (state, input)
-    counter' = succ counter
+  let ((newKernel, newSubImg), out) = conv1D (kernel, subImg) (state, input)
+      counter' = succ counter
 
-    -- check for end of 8-cycle period
-    (nextState, nextCounter) =
-      case state of
-        LOAD_KERNEL  -> if counter == maxBound then (LOAD_SUBIMG, 0)  else (state, counter')
-        LOAD_SUBIMG  -> if counter == maxBound then (CONV, 0)         else (state, counter')
-        CONV         -> if counter == maxBound then (LOAD_SUBIMG, 0)  else (state, counter')
-        _            -> (LOAD_KERNEL, 0)
-  in
-    ((nextState, nextCounter, newKernel, newSubImg), out)
+      -- check for end of 8-cycle period
+      (nextState, nextCounter) =
+        case state of
+          LOAD_KERNEL -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          LOAD_SUBIMG -> if counter == maxBound then (CONV, 0) else (state, counter')
+          CONV -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          _ -> (LOAD_KERNEL, 0)
+   in ((nextState, nextCounter, newKernel, newSubImg), out)
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simConv1DTbPrint' to print out all the iner stages of the states
