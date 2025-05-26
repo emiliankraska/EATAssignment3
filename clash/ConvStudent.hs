@@ -16,6 +16,7 @@ import Debug.Trace
 import SobelStream
 import SobelTbData
 import SobelVerifier
+import Prelude qualified (zip)
 
 -----------------------------------------------------------------------------------------
 -- Clash Q1: First conv to AXIS
@@ -48,13 +49,19 @@ rConv vec1 vec2 = register 0 (conv <$> vec1 <*> vec2)
 rConvTb ::
   forall dom a n.
   (HiddenClockResetEnable dom, KnownNat a, NFDataX n, SaturatingNum n) =>
-  (Signal dom Vec n (a, a)) ->
+  (Signal dom (Vec a n, Vec a n)) ->
   Signal dom n
 rConvTb bvec =
   let (vec1, vec2) = unbundle bvec
    in rConv vec1 vec2
 
-simRConvTb = simulate @System rConvTb (Prelude.zip [1, 2, 3, 4] [2, 3, 4, 5])
+simRConvTb = simulate @System rConvTb testInput
+
+testInput =
+  [ (1 :> 2 :> Nil, 3 :> 4 :> Nil),
+    (5 :> 6 :> Nil, 7 :> 8 :> Nil),
+    (9 :> 10 :> Nil, 11 :> 12 :> Nil)
+  ]
 
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
