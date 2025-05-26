@@ -16,6 +16,7 @@ import Debug.Trace
 import SobelStream
 import SobelTbData
 import SobelVerifier
+import Prelude qualified (zip)
 
 -----------------------------------------------------------------------------------------
 -- Clash Q1: First conv to AXIS
