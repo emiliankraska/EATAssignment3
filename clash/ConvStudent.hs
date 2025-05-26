@@ -73,7 +73,19 @@ conv1D ::
   ( (Vec a n, Vec a n), -- STATE': New kernel and image
     n -- OUTPUT: Convolved feature
   )
-conv1D = undefined
+conv1D (kernel, subImg) (state, input) =
+  case state of
+    LOAD_KERNEL ->
+      let newKernel = input :> init kernel
+       in ((newKernel, subImg), 0)
+    LOAD_SUBIMG ->
+      let newSubImg = input :> init subImg
+       in ((kernel, newSubImg), 0)
+    CONV ->
+      let newSubImg = input :> init subImg
+          result = conv kernel newSubImg
+       in ((kernel, newSubImg), result)
+    _ -> ((kernel, subImg), 0) -- default for future states
 
 -----------------------------------------------------------------------------------------
 -- Testing the conv1D function
@@ -85,7 +97,18 @@ conv1D' ::
   ( (ConvState, Index a, Vec a n, Vec a n), -- STATE': new ConvState, counter, kernel and image
     n -- OUTPUT: Convolved feature
   )
-conv1D' = undefined
+conv1D' (state, counter, kernel, subImg) input =
+  let ((newKernel, newSubImg), out) = conv1D (kernel, subImg) (state, input)
+      counter' = succ counter
+
+      -- check for end of 8-cycle period
+      (nextState, nextCounter) =
+        case state of
+          LOAD_KERNEL -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          LOAD_SUBIMG -> if counter == maxBound then (CONV, 0) else (state, counter')
+          CONV -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          _ -> (LOAD_KERNEL, 0)
+   in ((nextState, nextCounter, newKernel, newSubImg), out)
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simConv1DTbPrint' to print out all the iner stages of the states
