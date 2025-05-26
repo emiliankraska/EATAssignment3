@@ -60,6 +60,9 @@ simRConvTb = simulate @System rConvTb (Prelude.zip [1, 2, 3, 4] [2, 3, 4, 5])
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
 
+data ConvState = LOAD_KERNEL | LOAD_SUBIMG | CONV | CONV_NO_PIPE
+deriving (Show, Generic, NFDataX, Eq)
+
 conv1D ::
   (KnownNat a, SaturatingNum n) =>
   (Vec a n, Vec a n) -> -- STATE: Current kernel and image
@@ -67,7 +70,24 @@ conv1D ::
   ( (Vec a n, Vec a n), -- STATE': New kernel and image
     n -- OUTPUT: Convolved feature
   )
-conv1D = undefined
+conv1D (kernel, subImg) (state, input) =
+conv1D (kernel, subImg) (state, input) =
+  case state of
+    LOAD_KERNEL ->
+      let newKernel = input :> init kernel
+      in ((newKernel, subImg), 0)
+
+    LOAD_SUBIMG ->
+      let newSubImg = input :> init subImg
+      in ((kernel, newSubImg), 0)
+
+    CONV ->
+      let newSubImg = input :> init subImg
+          result = conv kernel newSubImg
+      in ((kernel, newSubImg), result)
+
+    _ -> ((kernel, subImg), 0)  -- default for future states
+
 
 -----------------------------------------------------------------------------------------
 -- Testing the conv1D function
