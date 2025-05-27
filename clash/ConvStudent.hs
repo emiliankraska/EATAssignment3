@@ -17,6 +17,7 @@ import SobelStream
 import SobelTbData
 import SobelVerifier
 import Prelude qualified (zip)
+import Clash.Explicit.Prelude (Applicative(liftA2))
 
 -----------------------------------------------------------------------------------------
 -- Clash Q1: First conv to AXIS
@@ -66,7 +67,6 @@ testInput =
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
 
-
 conv1D ::
   (KnownNat a, SaturatingNum n) =>
   (Vec a n, Vec a n) -> -- STATE: Current kernel and image
@@ -77,16 +77,14 @@ conv1D ::
 conv1D (kernel, subImg) (state, input) =
   case state of
     LOAD_KERNEL ->
-      let newKernel = kernel <<+ input
-      in ((newKernel, subImg), 0)
-
+      let newKernel = input +>> kernel
+       in ((newKernel, subImg), 0)
     LOAD_SUBIMG ->
-      let newSubImg = subImg <<+ input
-      in ((kernel, newSubImg), 0)
-
+      let newSubImg = input +>> subImg
+       in ((kernel, newSubImg), 0)
     CONV ->
-      let newSubImg = subImg <<+ input
-          result = conv kernel newSubImg
+      let newSubImg = input +>> subImg
+          result = conv kernel subImg
        in ((kernel, newSubImg), result)
     _ -> ((kernel, subImg), 0) -- default for future states
 
@@ -109,7 +107,7 @@ conv1D' (state, counter, kernel, subImg) input =
         case state of
           LOAD_KERNEL -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
           LOAD_SUBIMG -> if counter == maxBound then (CONV, 0) else (state, counter')
-          CONV -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          CONV -> (LOAD_SUBIMG, 1)
           _ -> (LOAD_KERNEL, 0)
    in ((nextState, nextCounter, newKernel, newSubImg), out)
 
@@ -133,12 +131,14 @@ mConv1D' ::
   SNat a -> -- Depth vector
   Signal dom n -> -- New item either for the kernel or image
   Signal dom n -- Convolved feature
-mConv1D' = undefined
+mConv1D' snat = mealy conv1D' (LOAD_KERNEL, 0, replicate snat 0, replicate snat 0)
+
+input = [1, 2, 3, 4]
 
 simMConv1DTb :: [Signed 16]
-simMConv1DTb = undefined
+simMConv1DTb = simulate @System (mConv1D' d9) input
 
-simMConv1DTbPrint = mapM_ print $ L.zip [1 ..] simMConv1DTb
+simMConv1DTbPrint = mapM_ print $ L.zip [1 ..] rockyFirstNoReuseInps
 
 -----------------------------------------------------------------------------------------
 -- Making an AXIS version of the conv1D function
@@ -151,7 +151,51 @@ axisConv1D ::
   ( (ConvState, Index a, Vec a n, Vec a n, k), -- STATE': New  convState, counter, kernel, image, keep
     (Maybe (Axi4Stream n k), Bool) -- OUTPUT: AXIS master, s_axis_tready
   )
-axisConv1D = undefined
+axisConv1D (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
+  let 
+      counter' = succ counter
+
+      vld =
+        case (s_axis, s_axis_tready) of
+          (Just _, True) -> True -- Incoming packet is valid & local slave is ready
+          _ -> False
+
+      (s_axis_tdata, s_axis_tlast, s_axis_tkeep) =
+        case s_axis of
+          (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
+          _ -> (0, False, 0) -- default data
+
+      s_axis_tready = not (state == CONV) && m_axis_tready
+
+      m_axis_tvalid
+        | state == CONV = True -- Convolutional feature available
+        | otherwise = False -- Convolutional feature not available
+
+      m_axis
+        | m_axis_tvalid =
+          Just
+            Axi4Stream
+              {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
+        | otherwise = Nothing
+
+      ((newKernel, newSubImg), cf) = if vld || (m_axis_tvalid && m_axis_tready)
+        then conv1D (kernel, subImg) (state, s_axis_tdata)
+        else ((kernel, subImg), 0)
+
+      (nextState, nextCounter) =
+        case state of
+          LOAD_KERNEL -> if vld then
+              if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+            else (state, counter)
+          LOAD_SUBIMG -> if vld then
+            if counter == maxBound then (CONV, 0) else (state, counter')
+            else (state, counter)
+          CONV -> if m_axis_tready then
+            (LOAD_SUBIMG, 1)
+            else (state, counter)
+          _ -> (LOAD_KERNEL, 0)
+
+   in ((nextState, nextCounter, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simAxisConv1DTbPrint to print out all the iner stages of the states
@@ -174,7 +218,7 @@ mAxisConv1D ::
   Signal dom (Maybe (Axi4Stream n k)) ->
   Signal dom Bool ->
   Signal dom (Maybe (Axi4Stream n k), Bool)
-mAxisConv1D = undefined
+mAxisConv1D snat stream ready = mealy axisConv1D (LOAD_KERNEL, 0, replicate snat 0, replicate snat 0, 0) (bundle (stream, ready))
 
 mAxisConv1DTb ::
   (HiddenClockResetEnable dom) =>
