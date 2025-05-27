@@ -243,9 +243,9 @@ simMAxisConv1DTbPrint = mapM_ print $ L.zip [1 ..] simMAxisConv1DTb
 
 serConv1D ::
   (KnownNat a, SaturatingNum n) =>
-  (Vec a n, n, Index a) -> -- STATE: Current kernel and image
+  (Vec a n, n, Index a) -> -- STATE: Current kernel, accumulator and counter
   (ConvState, n) -> -- INPUT: ConvState and value that must be streamed in
-  ( (Vec a n, n, Index a), -- STATE': New kernel and image
+  ( (Vec a n, n, Index a), -- STATE': New kernel, accumulator and counter
     n -- OUTPUT: Convolved feature
   )
 serConv1D (kernel, acc, counter) (state, input) =
@@ -267,9 +267,9 @@ serConv1D (kernel, acc, counter) (state, input) =
 
 serConv1D' ::
   (KnownNat a, SaturatingNum n) =>
-  (ConvState, Vec a n, n, Index a) -> -- STATE: current ConvState, counter, kernel and image
+  (ConvState, Vec a n, n, Index a) -> -- STATE: current ConvState, kernel, accumulator and counter
   n -> -- INPUT: New item either for the kernel or image
-  ( (ConvState, Vec a n, n, Index a), -- STATE': new ConvState, counter, kernel and image
+  ( (ConvState, Vec a n, n, Index a), -- STATE': new ConvState, kernel, accumulator and counter
     n -- OUTPUT: Convolved feature
   )
 serConv1D' (state, kernel, acc, counter) input =
@@ -313,17 +313,66 @@ simMSerConv1DTbPrint' = mapM_ print $ L.zip [1 ..] simMSerConv1DTb'
 
 -----------------------------------------------------------------------------------------
 -- Implementation of axisSerConv1D
-axisSerConv1D = undefined
+axisSerConv1D ::
+  forall a n k.
+  (KnownNat a, SaturatingNum n, Num k) =>
+  (ConvState, Vec a n, n, Index a, k) -> -- STATE: Current ConvState, kernel, accumulator, counter and keep
+  (Maybe (Axi4Stream n k), Bool) -> -- INPUT: AXIS slave, m_axis_tready
+  ( (ConvState, Vec a n, n, Index a, k), -- STATE': Current ConvState, kernel, accumulator, counter and keep
+    (Maybe (Axi4Stream n k), Bool) -- OUTPUT: AXIS master, s_axis_tready
+  )
+axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
+  let 
+      counter' = succ counter
+
+      vld =
+        case (s_axis, s_axis_tready) of
+          (Just _, True) -> True -- Incoming packet is valid & local slave is ready
+          _ -> False
+
+      (s_axis_tdata, s_axis_tlast, s_axis_tkeep) =
+        case s_axis of
+          (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
+          _ -> (0, False, 0) -- default data
+
+      s_axis_tready = not (state == CONV) && m_axis_tready
+
+      m_axis_tvalid
+        | state == CONV = True -- Convolutional feature available
+        | otherwise = False -- Convolutional feature not available
+
+      m_axis
+        | m_axis_tvalid =
+          Just
+            Axi4Stream
+              {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
+        | otherwise = Nothing
+
+      ((nextKernel, nextAcc, _), cf) = if vld || (m_axis_tvalid && m_axis_tready)
+        then serConv1D (kernel, acc, counter) (state, s_axis_tdata)
+        else ((kernel, acc, counter), 0)
+
+      (nextState, nextCounter) =
+        case state of
+          LOAD_KERNEL -> if vld
+            then if counter == maxBound then (CONV, 0) else (state, counter')
+            else (state, counter)
+          CONV -> if (m_axis_tvalid && m_axis_tready)
+            then if counter == maxBound then (CONV, 0) else (state, counter')
+            else (state, counter)
+          _ -> (LOAD_KERNEL, 0)
+
+   in ((nextState, nextKernel, nextAcc, nextCounter, s_axis_tkeep), (m_axis, s_axis_tready))
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simSerAxisConv1DTbPrint to print out all the iner stages of the states
--- simSerAxisConv1D :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)] -> String
--- simSerAxisConv1D = sim axisSerConv1D undefined -- DEFINE Initial state
+simSerAxisConv1D :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)] -> String
+simSerAxisConv1D = sim axisSerConv1D (LOAD_KERNEL, replicate d9 0, 0, 0, 0)
 
--- simSerAxisConv1DTb :: String
--- simSerAxisConv1DTb = simSerAxisConv1D mAxisConv1DTbNoReuseInp
+simSerAxisConv1DTb :: String
+simSerAxisConv1DTb = simSerAxisConv1D mAxisConv1DTbNoReuseInp
 
--- simSerAxisConv1DTbPrint = putStrLn simSerAxisConv1DTb
+simSerAxisConv1DTbPrint = putStrLn simSerAxisConv1DTb
 -----------------------------------------------------------------------------------------
 
 -----------------------------------------------------------------------------------------
@@ -334,13 +383,16 @@ mAxisSerConv1D ::
   Signal dom (Maybe (Axi4Stream n k)) ->
   Signal dom Bool ->
   Signal dom (Maybe (Axi4Stream n k), Bool)
-mAxisSerConv1D = undefined
+mAxisSerConv1D stream ready = mealy axisSerConv1D (LOAD_KERNEL, replicate d9 0, 0, 0, 0) (bundle (stream, ready))
 
 mAxisSerConv1DTb ::
   (HiddenClockResetEnable dom) =>
   Signal dom (Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool) ->
   Signal dom (Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)
-mAxisSerConv1DTb = undefined
+mAxisSerConv1DTb s_axis = o
+  where
+    (s_axis', m_axis_tready) = unbundle s_axis
+    o = mAxisSerConv1D s_axis' m_axis_tready
 
 simMAxisSerConv1DTb :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)]
 simMAxisSerConv1DTb = simulate @System mAxisSerConv1DTb mAxisConv1DTbNoReuseInp
