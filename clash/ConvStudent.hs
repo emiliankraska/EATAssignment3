@@ -519,23 +519,61 @@ serConvAccel clk rst s_axis = o
 -----------------------------------------------------------------------------------------
 -- conv1DReuse function
 
-conv1DReuse = undefined
+conv1DReuse ::
+  (KnownNat a, SaturatingNum n) =>
+  (ConvState, Index a, Vec a n, Vec a n) -> -- STATE: current ConvState, counter, kernel, subImg
+  n -> -- INPUT: incoming pixel (kernel or image stream)
+  ( (ConvState, Index a, Vec a n, Vec a n), -- STATE': next state, counter, kernel, subImg
+    n -- OUTPUT: convolved result (or 0 if not ready)
+  )
+conv1DReuse (state, counter, kernel, subImg) input =
+  let
+    -- Update counter
+    counter' = succ counter
+
+    -- Transition logic
+    (nextState, nextCounter) =
+      case state of
+        LOAD_KERNEL -> if counter == maxBound then (LOAD_SUBIMG, 0) else (LOAD_KERNEL, counter')
+        LOAD_SUBIMG -> if counter == maxBound then (CONV, 0) else (LOAD_SUBIMG, counter')
+        CONV        -> if counter == maxBound then (CONV, 0) else (CONV, counter')  -- Reuse: stay in CONV state
+
+    -- Kernel update (only during LOAD_KERNEL)
+    newKernel =
+      case state of
+        LOAD_KERNEL -> kernel <<+ input
+        _           -> kernel
+
+    -- Sub-image update (shift for LOAD_SUBIMG and CONV)
+    newSubImg =
+      case state of
+        LOAD_SUBIMG -> subImg <<+ input
+        CONV        -> subImg <<+ input
+        _           -> subImg
+
+    -- Only compute convolution in CONV state
+    out =
+      case state of
+        CONV -> conv newKernel newSubImg
+        _    -> 0
+  in
+    ((nextState, nextCounter, newKernel, newSubImg), out)
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simConv1DReuseTbPrint to print out all the iner stages of the states
--- simConv1DReuse :: (Show a, SaturatingNum a) => [a] -> [Char]
--- simConv1DReuse = sim conv1DReuse undefined
+simConv1DReuse :: (Show a, SaturatingNum a) => [a] -> [Char]
+simConv1DReuse = sim conv1DReuse (LOAD_KERNEL, 0, replicate d9 0, replicate d9 0)
 
--- simConv1DReuseTb :: String
--- simConv1DReuseTb = simConv1DReuse rockyFirstReuseInps
+simConv1DReuseTb :: String
+simConv1DReuseTb = simConv1DReuse rockyFirstReuseInps
 
--- simConv1DReuseTbPrint' = putStrLn simConv1DReuseTb
+simConv1DReuseTbPrint' = putStrLn simConv1DReuseTb
 -----------------------------------------------------------------------------------------
 
 -----------------------------------------------------------------------------------------
 -- conv1DReuse in a mealy machine and simulation
 
-mConv1DReuse = undefined
+mConv1DReuse = mealy conv1DReuse (LOAD_KERNEL, 0, replicate d9 0, replicate d9 0)
 
 simMConv1DReuse :: [Signed 16]
 simMConv1DReuse = simulate @System mConv1DReuse rockyFirstReuseInps
