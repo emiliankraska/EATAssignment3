@@ -17,6 +17,7 @@ import SobelStream
 import SobelTbData
 import SobelVerifier
 import Prelude qualified (zip)
+import Clash.Explicit.Prelude (Applicative(liftA2))
 
 -----------------------------------------------------------------------------------------
 -- Clash Q1: First conv to AXIS
@@ -76,13 +77,13 @@ conv1D ::
 conv1D (kernel, subImg) (state, input) =
   case state of
     LOAD_KERNEL ->
-      let newKernel = kernel <<+ input
+      let newKernel = input +>> kernel
        in ((newKernel, subImg), 0)
     LOAD_SUBIMG ->
-      let newSubImg = subImg <<+ input
+      let newSubImg = input +>> subImg
        in ((kernel, newSubImg), 0)
     CONV ->
-      let newSubImg = subImg <<+ input
+      let newSubImg = input +>> subImg
           result = conv kernel newSubImg
        in ((kernel, newSubImg), result)
     _ -> ((kernel, subImg), 0) -- default for future states
@@ -152,7 +153,6 @@ axisConv1D ::
   )
 axisConv1D (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
   let 
-      ((newKernel, newSubImg), cf) = conv1D (kernel, subImg) (state, s_axis_tdata)
       counter' = succ counter
 
       vld =
@@ -178,11 +178,14 @@ axisConv1D (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
               {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
         | otherwise = Nothing
 
-      -- check for end of 8-cycle period
+      ((newKernel, newSubImg), cf) = if vld || m_axis_tvalid
+        then conv1D (kernel, subImg) (state, s_axis_tdata)
+        else ((kernel, subImg), 0)
+
       (nextState, nextCounter) =
         case state of
           LOAD_KERNEL -> if vld then
-            if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+              if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
             else (state, counter)
           LOAD_SUBIMG -> if vld then
             if counter == maxBound then (CONV, 0) else (state, counter')
@@ -213,7 +216,7 @@ mAxisConv1D ::
   Signal dom (Maybe (Axi4Stream n k)) ->
   Signal dom Bool ->
   Signal dom (Maybe (Axi4Stream n k), Bool)
-mAxisConv1D = undefined
+mAxisConv1D snat stream ready = mealy axisConv1D (LOAD_KERNEL, 0, replicate snat 0, replicate snat 0, 0) (bundle (stream, ready))
 
 mAxisConv1DTb ::
   (HiddenClockResetEnable dom) =>
