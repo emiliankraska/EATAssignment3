@@ -84,7 +84,7 @@ conv1D (kernel, subImg) (state, input) =
        in ((kernel, newSubImg), 0)
     CONV ->
       let newSubImg = input +>> subImg
-          result = conv kernel newSubImg
+          result = conv kernel subImg
        in ((kernel, newSubImg), result)
     _ -> ((kernel, subImg), 0) -- default for future states
 
@@ -107,7 +107,7 @@ conv1D' (state, counter, kernel, subImg) input =
         case state of
           LOAD_KERNEL -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
           LOAD_SUBIMG -> if counter == maxBound then (CONV, 0) else (state, counter')
-          CONV -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          CONV -> (LOAD_SUBIMG, 1)
           _ -> (LOAD_KERNEL, 0)
    in ((nextState, nextCounter, newKernel, newSubImg), out)
 
@@ -178,7 +178,7 @@ axisConv1D (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
               {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
         | otherwise = Nothing
 
-      ((newKernel, newSubImg), cf) = if vld || m_axis_tvalid
+      ((newKernel, newSubImg), cf) = if vld || (m_axis_tvalid && m_axis_tready)
         then conv1D (kernel, subImg) (state, s_axis_tdata)
         else ((kernel, subImg), 0)
 
@@ -190,7 +190,9 @@ axisConv1D (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
           LOAD_SUBIMG -> if vld then
             if counter == maxBound then (CONV, 0) else (state, counter')
             else (state, counter)
-          CONV -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          CONV -> if m_axis_tready then
+            (LOAD_SUBIMG, 1)
+            else (state, counter)
           _ -> (LOAD_KERNEL, 0)
 
    in ((nextState, nextCounter, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
