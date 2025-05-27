@@ -241,22 +241,58 @@ simMAxisConv1DTbPrint = mapM_ print $ L.zip [1 ..] simMAxisConv1DTb
 -----------------------------------------------------------------------------------------
 --  Implementation of serConv1D
 
-serConv1D = undefined
+serConv1D ::
+  (KnownNat a, SaturatingNum n) =>
+  (Vec a n, n, Index a) -> -- STATE: Current kernel and image
+  (ConvState, n) -> -- INPUT: ConvState and value that must be streamed in
+  ( (Vec a n, n, Index a), -- STATE': New kernel and image
+    n -- OUTPUT: Convolved feature
+  )
+serConv1D (kernel, acc, counter) (state, input) =
+  case state of
+    LOAD_KERNEL ->
+      let newKernel = kernel <<+ input
+       in ((newKernel, acc, counter), -1)
+    CONV ->
+      let 
+          newAcc = if counter == 0 
+            then input * kernel !! 0
+            else acc + input * kernel !! counter
+
+       in ((kernel, newAcc, counter), newAcc)
+    _ -> ((kernel, acc, counter), 0) -- default for future states
 
 -----------------------------------------------------------------------------------------
 --  Implementation of serConv1D'
 
-serConv1D' = undefined
+serConv1D' ::
+  (KnownNat a, SaturatingNum n) =>
+  (ConvState, Vec a n, n, Index a) -> -- STATE: current ConvState, counter, kernel and image
+  n -> -- INPUT: New item either for the kernel or image
+  ( (ConvState, Vec a n, n, Index a), -- STATE': new ConvState, counter, kernel and image
+    n -- OUTPUT: Convolved feature
+  )
+serConv1D' (state, kernel, acc, counter) input =
+  let ((nextKernel, nextAcc, _), out) = serConv1D (kernel, acc, counter) (state, input)
+      counter' = succ counter
+      
+      -- check for end of 8-cycle period
+      (nextState, nextCounter) =
+        case state of
+          LOAD_KERNEL -> if counter == maxBound then (CONV, 0) else (state, counter')
+          CONV -> if counter == maxBound then (CONV, 0) else (state, counter')
+          _ -> (LOAD_KERNEL, 0)
+   in ((nextState, nextKernel, nextAcc, nextCounter), out)
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simSerConv1DTbPrint' to print out all the iner stages of the states
--- simSerConv1D' :: (Show a, Num a) => [a] -> [Char]
--- simSerConv1D' = sim serConv1D' undefined --
+simSerConv1D' :: (Show a, SaturatingNum a) => [a] -> [Char]
+simSerConv1D' = sim serConv1D' (LOAD_KERNEL, replicate d9 0, 0, 0)
 
--- simSerConv1DTb' :: String
--- simSerConv1DTb' = simSerConv1D' rockyFirstNoReuseInps
+simSerConv1DTb' :: String
+simSerConv1DTb' = simSerConv1D' rockyFirstNoReuseInps
 
--- simSerConv1DTbPrint' = putStrLn simSerConv1DTb'
+simSerConv1DTbPrint' = putStrLn simSerConv1DTb'
 -----------------------------------------------------------------------------------------
 
 -----------------------------------------------------------------------------------------
@@ -267,7 +303,7 @@ mSerConv1D' ::
   (HiddenClockResetEnable dom, SaturatingNum n, NFDataX n) =>
   Signal dom n -> -- New item either for the kernel or image
   Signal dom n -- Convolved feature
-mSerConv1D' = undefined
+mSerConv1D' = mealy serConv1D' (LOAD_KERNEL, replicate d9 0, 0, 0)
 
 -- Simulation for the mSerConv1D' below
 simMSerConv1DTb' :: [Signed 16]
