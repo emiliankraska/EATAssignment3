@@ -133,10 +133,12 @@ mConv1D' ::
   SNat a -> -- Depth vector
   Signal dom n -> -- New item either for the kernel or image
   Signal dom n -- Convolved feature
-mConv1D' = undefined
+mConv1D' snat = mealy conv1D' (LOAD_KERNEL, 0, replicate snat 0, replicate snat 0)
+
+input = [1, 2, 3, 4]
 
 simMConv1DTb :: [Signed 16]
-simMConv1DTb = undefined
+simMConv1DTb = simulate @System (mConv1D' d9) input
 
 simMConv1DTbPrint = mapM_ print $ L.zip [1 ..] simMConv1DTb
 
