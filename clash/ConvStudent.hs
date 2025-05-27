@@ -66,7 +66,6 @@ testInput =
 -----------------------------------------------------------------------------------------
 -- State machine to handle input streams
 
-
 conv1D ::
   (KnownNat a, SaturatingNum n) =>
   (Vec a n, Vec a n) -> -- STATE: Current kernel and image
@@ -78,12 +77,10 @@ conv1D (kernel, subImg) (state, input) =
   case state of
     LOAD_KERNEL ->
       let newKernel = kernel <<+ input
-      in ((newKernel, subImg), 0)
-
+       in ((newKernel, subImg), 0)
     LOAD_SUBIMG ->
       let newSubImg = subImg <<+ input
-      in ((kernel, newSubImg), 0)
-
+       in ((kernel, newSubImg), 0)
     CONV ->
       let newSubImg = subImg <<+ input
           result = conv kernel newSubImg
@@ -140,7 +137,7 @@ input = [1, 2, 3, 4]
 simMConv1DTb :: [Signed 16]
 simMConv1DTb = simulate @System (mConv1D' d9) input
 
-simMConv1DTbPrint = mapM_ print $ L.zip [1 ..] simMConv1DTb
+simMConv1DTbPrint = mapM_ print $ L.zip [1 ..] rockyFirstNoReuseInps
 
 -----------------------------------------------------------------------------------------
 -- Making an AXIS version of the conv1D function
@@ -153,7 +150,47 @@ axisConv1D ::
   ( (ConvState, Index a, Vec a n, Vec a n, k), -- STATE': New  convState, counter, kernel, image, keep
     (Maybe (Axi4Stream n k), Bool) -- OUTPUT: AXIS master, s_axis_tready
   )
-axisConv1D = undefined
+axisConv1D (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
+  let 
+      ((newKernel, newSubImg), cf) = conv1D (kernel, subImg) (state, s_axis_tdata)
+      counter' = succ counter
+
+      vld =
+        case (s_axis, s_axis_tready) of
+          (Just _, True) -> True -- Incoming packet is valid & local slave is ready
+          _ -> False
+
+      (s_axis_tdata, s_axis_tlast, s_axis_tkeep) =
+        case s_axis of
+          (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
+          _ -> (0, False, 0) -- default data
+
+      s_axis_tready = not (state == CONV) && m_axis_tready
+
+      m_axis_tvalid
+        | state == CONV = True -- Convolutional feature available
+        | otherwise = False -- Convolutional feature not available
+
+      m_axis
+        | m_axis_tvalid =
+          Just
+            Axi4Stream
+              {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
+        | otherwise = Nothing
+
+      -- check for end of 8-cycle period
+      (nextState, nextCounter) =
+        case state of
+          LOAD_KERNEL -> if vld then
+            if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+            else (state, counter)
+          LOAD_SUBIMG -> if vld then
+            if counter == maxBound then (CONV, 0) else (state, counter')
+            else (state, counter)
+          CONV -> if counter == maxBound then (LOAD_SUBIMG, 0) else (state, counter')
+          _ -> (LOAD_KERNEL, 0)
+
+   in ((nextState, nextCounter, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simAxisConv1DTbPrint to print out all the iner stages of the states
