@@ -348,7 +348,9 @@ axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
               {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
         | otherwise = Nothing
 
-      ((nextKernel, nextAcc, _), cf) = if vld || (m_axis_tvalid && m_axis_tready)
+      m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
+
+      ((nextKernel, nextAcc, _), cf) = if vld || m_axis_valid_and_ready
         then serConv1D (kernel, acc, counter) (state, s_axis_tdata)
         else ((kernel, acc, counter), 0)
 
@@ -357,7 +359,7 @@ axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
           LOAD_KERNEL -> if vld
             then if counter == maxBound then (CONV, 0) else (state, counter')
             else (state, counter)
-          CONV -> if (m_axis_tvalid && m_axis_tready)
+          CONV -> if m_axis_valid_and_ready
             then if counter == maxBound then (CONV, 0) else (state, counter')
             else (state, counter)
           _ -> (LOAD_KERNEL, 0)
@@ -583,25 +585,103 @@ simMConv1DReusePrint = mapM_ print $ L.zip [1 ..] simMConv1DReuse
 -----------------------------------------------------------------------------------------
 -- conv1DReuse with axis
 
-axisConv1DReuse = undefined
+axisConv1DReuse ::
+  forall a n k.
+  (KnownNat a, SaturatingNum n, Num k) =>
+  (ConvState, Index a, Vec a n, Vec a n, k) -> -- STATE: Current convState, counter, kernel, image, keep
+  (Maybe (Axi4Stream n k), Bool) -> -- INPUT: AXIS slave, m_axis_tready
+  ( (ConvState, Index a, Vec a n, Vec a n, k), -- STATE': New  convState, counter, kernel, image, keep
+    (Maybe (Axi4Stream n k), Bool) -- OUTPUT: AXIS master, s_axis_tready
+  )
+axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
+  let 
+      counter' = succ counter
+
+      vld =
+        case (s_axis, s_axis_tready) of
+          (Just _, True) -> True -- Incoming packet is valid & local slave is ready
+          _ -> False
+
+      (s_axis_tdata, s_axis_tlast, s_axis_tkeep) =
+        case s_axis of
+          (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
+          _ -> (0, False, 0) -- default data
+
+      s_axis_tready = not (state == CONV) && m_axis_tready
+
+      m_axis_tvalid
+        | state == CONV = True -- Convolutional feature available
+        | otherwise = False -- Convolutional feature not available
+
+      m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
+
+      m_axis
+        | m_axis_tvalid =
+          Just
+            Axi4Stream
+              {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
+        | otherwise = Nothing
+
+      -- Transition logic
+      (nextState, nextCounter) =
+        case (state, vld, m_axis_valid_and_ready) of
+          (LOAD_KERNEL, True, _)  -> if counter == maxBound then (LOAD_SUBIMG, 0) else (LOAD_KERNEL, counter')
+          (LOAD_SUBIMG, True, _)  -> if counter == maxBound then (CONV, 0) else (LOAD_SUBIMG, counter')
+          (CONV, True, True)      -> if counter == maxBound then (CONV, 0) else (CONV, counter')  -- Reuse: stay in CONV state
+          _                       -> (state, counter)
+          
+      -- Kernel update (only during LOAD_KERNEL)
+      newKernel =
+        case (state, vld) of
+          (LOAD_KERNEL, True) -> kernel <<+ s_axis_tdata
+          _           -> kernel
+
+      -- Sub-image update (shift for LOAD_SUBIMG and CONV)
+      newSubImg =
+        case (state, vld, m_axis_valid_and_ready) of
+          (LOAD_SUBIMG, True, _)  -> subImg <<+ s_axis_tdata
+          (CONV, True, True)      -> subImg <<+ s_axis_tdata
+          _                       -> subImg
+
+      -- Only compute convolution in CONV state
+      cf =
+        case (state, vld, m_axis_valid_and_ready) of
+          (CONV, True, True)  -> conv newKernel newSubImg
+          _                   -> 0
+
+   in ((nextState, nextCounter, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
+
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simSerAxisConv1DTbPrint to print out all the iner stages of the states
--- simAxisConv1DReuse :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)] -> String
--- simAxisConv1DReuse = sim axisConv1DReuse undefined -- DEFINE Initial state
+simAxisConv1DReuse :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)] -> String
+simAxisConv1DReuse = sim axisConv1DReuse (LOAD_KERNEL, 0, replicate d9 0, replicate d9 0, 0) -- DEFINE Initial state
 
--- simAxisConv1DReuseTb :: String
--- simAxisConv1DReuseTb = simAxisConv1DReuse mAxisConv1DTbReuseInp
+simAxisConv1DReuseTb :: String
+simAxisConv1DReuseTb = simAxisConv1DReuse mAxisConv1DTbReuseInp
 
--- simAxisConv1DReuseTbPrint = putStrLn simAxisConv1DReuseTb
+simAxisConv1DReuseTbPrint = putStrLn simAxisConv1DReuseTb
 -----------------------------------------------------------------------------------------
 
 -----------------------------------------------------------------------------------------
 -- axisConv1DReuse in a mealy machine and simulation
 
-mAxisConv1DReuse = undefined
+mAxisConv1DReuse ::
+  (SaturatingNum n, Num k, NFDataX n, HiddenClockResetEnable dom, KnownNat p, NFDataX k) =>
+  SNat p ->
+  Signal dom (Maybe (Axi4Stream n k)) ->
+  Signal dom Bool ->
+  Signal dom (Maybe (Axi4Stream n k), Bool)
+mAxisConv1DReuse snat stream ready = mealy axisConv1DReuse (LOAD_KERNEL, 0, replicate snat 0, replicate snat 0, 0) (bundle (stream, ready))
 
-mAxisConv1DReuseTb = undefined
+mAxisConv1DReuseTb ::
+  (HiddenClockResetEnable dom) =>
+  Signal dom (Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool) ->
+  Signal dom (Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)
+mAxisConv1DReuseTb s_axis = o
+  where
+    (s_axis', m_axis_tready) = unbundle s_axis
+    o = mAxisConv1DReuse d9 s_axis' m_axis_tready
 
 simMAxisConv1DReuseTb :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)]
 simMAxisConv1DReuseTb = simulate @System mAxisConv1DReuseTb mAxisConv1DTbReuseInp
