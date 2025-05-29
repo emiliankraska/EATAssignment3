@@ -555,8 +555,8 @@ conv1DReuse (state, counter, kernel, subImg) input =
 
     -- Only compute convolution in CONV state
     out =
-      case state of
-        CONV -> conv newKernel newSubImg
+      case (state, mod counter 3) of
+        (CONV, 0) -> conv kernel subImg
         _    -> 0
   in
     ((nextState, nextCounter, newKernel, newSubImg), out)
@@ -607,10 +607,12 @@ axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
           (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
           _ -> (0, False, 0) -- default data
 
-      s_axis_tready = not (state == CONV) && m_axis_tready
+      s_axis_tready = m_axis_tready
 
       m_axis_tvalid
-        | state == CONV = True -- Convolutional feature available
+        | not vld = False
+        | state == LOAD_SUBIMG && counter == maxBound = True
+        | state == CONV && s_axis_tlast = True -- Convolutional feature available
         | otherwise = False -- Convolutional feature not available
 
       m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
@@ -624,10 +626,11 @@ axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
 
       -- Transition logic
       (nextState, nextCounter) =
-        case (state, vld, m_axis_valid_and_ready) of
+        case (state, vld, m_axis_tready) of
           (LOAD_KERNEL, True, _)  -> if counter == maxBound then (LOAD_SUBIMG, 0) else (LOAD_KERNEL, counter')
           (LOAD_SUBIMG, True, _)  -> if counter == maxBound then (CONV, 0) else (LOAD_SUBIMG, counter')
-          (CONV, True, True)      -> if counter == maxBound then (CONV, 0) else (CONV, counter')  -- Reuse: stay in CONV state
+          (CONV, True, True)      -> if s_axis_tlast then (CONV, 0) -- new subimage complete
+                                      else (CONV, counter') -- load - stay in CONV
           _                       -> (state, counter)
           
       -- Kernel update (only during LOAD_KERNEL)
@@ -638,16 +641,17 @@ axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
 
       -- Sub-image update (shift for LOAD_SUBIMG and CONV)
       newSubImg =
-        case (state, vld, m_axis_valid_and_ready) of
+        case (state, vld, m_axis_tready) of
           (LOAD_SUBIMG, True, _)  -> subImg <<+ s_axis_tdata
           (CONV, True, True)      -> subImg <<+ s_axis_tdata
           _                       -> subImg
 
       -- Only compute convolution in CONV state
       cf =
-        case (state, vld, m_axis_valid_and_ready) of
-          (CONV, True, True)  -> conv newKernel newSubImg
-          _                   -> 0
+        case (state, vld, m_axis_tready, s_axis_tlast) of
+          (LOAD_SUBIMG, True, True, True)   -> conv newKernel newSubImg
+          (CONV, True, True, True)                 -> conv newKernel newSubImg
+          _                                     -> 0
 
    in ((nextState, nextCounter, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
 
