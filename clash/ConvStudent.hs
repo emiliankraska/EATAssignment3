@@ -17,7 +17,7 @@ import SobelStream
 import SobelTbData
 import SobelVerifier
 import Prelude qualified (zip)
-import Clash.Explicit.Prelude (Applicative(liftA2))
+import Clash.Explicit.Prelude (Applicative(liftA2), Bounded (maxBound))
 
 -----------------------------------------------------------------------------------------
 -- Clash Q1: First conv to AXIS
@@ -259,7 +259,7 @@ serConv1D (kernel, acc, counter) (state, input) =
             then input * kernel !! 0
             else acc + input * kernel !! counter
 
-       in ((kernel, newAcc, counter), newAcc)
+       in ((kernel, newAcc, counter), if counter == maxBound then newAcc else -1)
     _ -> ((kernel, acc, counter), 0) -- default for future states
 
 -----------------------------------------------------------------------------------------
@@ -335,20 +335,20 @@ axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
           (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
           _ -> (0, False, 0) -- default data
 
-      s_axis_tready = not (state == CONV) && m_axis_tready
+      s_axis_tready = m_axis_tready
 
       m_axis_tvalid
-        | state == CONV = True -- Convolutional feature available
+        | state == CONV && counter == maxBound = True -- Convolutional feature available
         | otherwise = False -- Convolutional feature not available
 
-      m_axis
-        | m_axis_tvalid =
+      m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
+
+      m_axis = if m_axis_valid_and_ready
+        then
           Just
             Axi4Stream
               {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
-        | otherwise = Nothing
-
-      m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
+        else Nothing
 
       ((nextKernel, nextAcc, _), cf) = if vld || m_axis_valid_and_ready
         then serConv1D (kernel, acc, counter) (state, s_axis_tdata)
@@ -359,7 +359,7 @@ axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
           LOAD_KERNEL -> if vld
             then if counter == maxBound then (CONV, 0) else (state, counter')
             else (state, counter)
-          CONV -> if m_axis_valid_and_ready
+          CONV -> if vld || m_axis_tready
             then if counter == maxBound then (CONV, 0) else (state, counter')
             else (state, counter)
           _ -> (LOAD_KERNEL, 0)
