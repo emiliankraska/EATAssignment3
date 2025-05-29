@@ -538,7 +538,7 @@ conv1DReuse (state, counter, kernel, subImg) input =
       case state of
         LOAD_KERNEL -> if counter == maxBound then (LOAD_SUBIMG, 0) else (LOAD_KERNEL, counter')
         LOAD_SUBIMG -> if counter == maxBound then (CONV, 0) else (LOAD_SUBIMG, counter')
-        CONV        -> if counter == maxBound then (CONV, 0) else (CONV, counter')  -- Reuse: stay in CONV state
+        CONV        -> if counter == 2 then (CONV, 0) else (CONV, counter')  -- Reuse: stay in CONV state
 
     -- Kernel update (only during LOAD_KERNEL)
     newKernel =
@@ -555,9 +555,10 @@ conv1DReuse (state, counter, kernel, subImg) input =
 
     -- Only compute convolution in CONV state
     out =
-      case (state, mod counter 3) of
-        (CONV, 0) -> conv kernel subImg
-        _    -> 0
+      case (state, counter) of
+        (LOAD_SUBIMG, 8)  -> conv kernel newSubImg
+        (CONV, 2)         -> conv kernel newSubImg
+        _                 -> 0
   in
     ((nextState, nextCounter, newKernel, newSubImg), out)
 
@@ -588,15 +589,13 @@ simMConv1DReusePrint = mapM_ print $ L.zip [1 ..] simMConv1DReuse
 axisConv1DReuse ::
   forall a n k.
   (KnownNat a, SaturatingNum n, Num k) =>
-  (ConvState, Index a, Vec a n, Vec a n, k) -> -- STATE: Current convState, counter, kernel, image, keep
+  (ConvState, Vec a n, Vec a n, k) -> -- STATE: Current convState, kernel, image, keep
   (Maybe (Axi4Stream n k), Bool) -> -- INPUT: AXIS slave, m_axis_tready
-  ( (ConvState, Index a, Vec a n, Vec a n, k), -- STATE': New  convState, counter, kernel, image, keep
+  ( (ConvState, Vec a n, Vec a n, k), -- STATE': New  convState, kernel, image, keep
     (Maybe (Axi4Stream n k), Bool) -- OUTPUT: AXIS master, s_axis_tready
   )
-axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
+axisConv1DReuse (state, kernel, subImg, keep) (s_axis, m_axis_tready) =
   let 
-      counter' = succ counter
-
       vld =
         case (s_axis, s_axis_tready) of
           (Just _, True) -> True -- Incoming packet is valid & local slave is ready
@@ -607,17 +606,11 @@ axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
           (Just x) -> (tData x, tLast x, tKeep x) -- extract data from axi record
           _ -> (0, False, 0) -- default data
 
-      s_axis_tready = m_axis_tready
+      s_axis_tready = m_axis_tready -- copy the ready state of external slave (ensure continuous communication)
 
-      m_axis_tvalid
-        | not vld = False
-        | state == LOAD_SUBIMG && counter == maxBound = True
-        | state == CONV && s_axis_tlast = True -- Convolutional feature available
-        | otherwise = False -- Convolutional feature not available
+      m_axis_tvalid = s_axis_tlast && not (state == LOAD_KERNEL) -- feature available
 
-      m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
-
-      m_axis
+      m_axis -- construct transmitted data or Nothing if feature not available
         | m_axis_tvalid =
           Just
             Axi4Stream
@@ -625,13 +618,11 @@ axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
         | otherwise = Nothing
 
       -- Transition logic
-      (nextState, nextCounter) =
-        case (state, vld, m_axis_tready) of
-          (LOAD_KERNEL, True, _)  -> if counter == maxBound then (LOAD_SUBIMG, 0) else (LOAD_KERNEL, counter')
-          (LOAD_SUBIMG, True, _)  -> if counter == maxBound then (CONV, 0) else (LOAD_SUBIMG, counter')
-          (CONV, True, True)      -> if s_axis_tlast then (CONV, 0) -- new subimage complete
-                                      else (CONV, counter') -- load - stay in CONV
-          _                       -> (state, counter)
+      nextState =
+        case (state, s_axis_tlast) of
+          (LOAD_KERNEL, True) -> LOAD_SUBIMG
+          (LOAD_SUBIMG, True) -> CONV
+          _                   -> state
           
       -- Kernel update (only during LOAD_KERNEL)
       newKernel =
@@ -641,25 +632,25 @@ axisConv1DReuse (state, counter, kernel, subImg, keep) (s_axis, m_axis_tready) =
 
       -- Sub-image update (shift for LOAD_SUBIMG and CONV)
       newSubImg =
-        case (state, vld, m_axis_tready) of
-          (LOAD_SUBIMG, True, _)  -> subImg <<+ s_axis_tdata
-          (CONV, True, True)      -> subImg <<+ s_axis_tdata
-          _                       -> subImg
+        case (state, vld) of
+          (LOAD_SUBIMG, True) -> subImg <<+ s_axis_tdata
+          (CONV, True)        -> subImg <<+ s_axis_tdata
+          _                   -> subImg
 
-      -- Only compute convolution in CONV state
+      -- Calculate the convolution only if the feature should be available
       cf =
-        case (state, vld, m_axis_tready, s_axis_tlast) of
-          (LOAD_SUBIMG, True, True, True)   -> conv newKernel newSubImg
-          (CONV, True, True, True)                 -> conv newKernel newSubImg
-          _                                     -> 0
+        case (state, m_axis_tvalid) of
+          (LOAD_SUBIMG, True) -> conv newKernel newSubImg
+          (CONV, True)        -> conv newKernel newSubImg
+          _                   -> 0
 
-   in ((nextState, nextCounter, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
+   in ((nextState, newKernel, newSubImg, s_axis_tkeep), (m_axis, s_axis_tready))
 
 
 -----------------------------------------------------------------------------------------
 -- You can use the simulation function simSerAxisConv1DTbPrint to print out all the iner stages of the states
 simAxisConv1DReuse :: [(Maybe (Axi4Stream (Signed 32) (Unsigned 4)), Bool)] -> String
-simAxisConv1DReuse = sim axisConv1DReuse (LOAD_KERNEL, 0, replicate d9 0, replicate d9 0, 0) -- DEFINE Initial state
+simAxisConv1DReuse = sim axisConv1DReuse (LOAD_KERNEL, replicate d9 0, replicate d9 0, 0) -- DEFINE Initial state
 
 simAxisConv1DReuseTb :: String
 simAxisConv1DReuseTb = simAxisConv1DReuse mAxisConv1DTbReuseInp
@@ -676,7 +667,7 @@ mAxisConv1DReuse ::
   Signal dom (Maybe (Axi4Stream n k)) ->
   Signal dom Bool ->
   Signal dom (Maybe (Axi4Stream n k), Bool)
-mAxisConv1DReuse snat stream ready = mealy axisConv1DReuse (LOAD_KERNEL, 0, replicate snat 0, replicate snat 0, 0) (bundle (stream, ready))
+mAxisConv1DReuse snat stream ready = mealy axisConv1DReuse (LOAD_KERNEL, replicate snat 0, replicate snat 0, 0) (bundle (stream, ready))
 
 mAxisConv1DReuseTb ::
   (HiddenClockResetEnable dom) =>
