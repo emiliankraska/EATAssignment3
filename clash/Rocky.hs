@@ -111,9 +111,9 @@ sobelCombine subset saveImage thres sobelXVld sobelYVld fp = do
 -- Run through all test cases
 tcRockyFullImage :: IO ()
 tcRockyFullImage = do
-  -- putStrLn "Test case SIMPLE_NO_REUSE"
-  -- tcRocky SIMPLE_NO_REUSE (convFeaturesRows * convFeaturesCols) True rockyEdgesSimpleNoReuseFP
-  -- putStrLn "Test case SERIAL_NO_REUSE"
-  -- tcRocky SERIAL_NO_REUSE (convFeaturesRows * convFeaturesCols) True rockyEdgesSerialNoReuseFP
+  putStrLn "Test case SIMPLE_NO_REUSE"
+  tcRocky SIMPLE_NO_REUSE (convFeaturesRows * convFeaturesCols) True rockyEdgesSimpleNoReuseFP
+  putStrLn "Test case SERIAL_NO_REUSE"
+  tcRocky SERIAL_NO_REUSE (convFeaturesRows * convFeaturesCols) True rockyEdgesSerialNoReuseFP
   putStrLn "Test case SIMPLE_REUSE"
   tcRocky SIMPLE_REUSE (convFeaturesRows * convFeaturesCols) True rockyEdgesSimpleReuseFP

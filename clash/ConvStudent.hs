@@ -323,8 +323,6 @@ axisSerConv1D ::
   )
 axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
   let 
-      counter' = succ counter
-
       vld =
         case (s_axis, s_axis_tready) of
           (Just _, True) -> True -- Incoming packet is valid & local slave is ready
@@ -337,32 +335,38 @@ axisSerConv1D (state, kernel, acc, counter, keep) (s_axis, m_axis_tready) =
 
       s_axis_tready = m_axis_tready
 
-      m_axis_tvalid
-        | state == CONV && counter == maxBound = True -- Convolutional feature available
-        | otherwise = False -- Convolutional feature not available
+      m_axis_tvalid = state == CONV && s_axis_tlast -- Convolutional feature available
 
       m_axis_valid_and_ready = m_axis_tvalid && m_axis_tready
 
-      m_axis = if m_axis_valid_and_ready
-        then
+      m_axis -- construct transmitted data or Nothing if feature not available
+        | m_axis_tvalid =
           Just
             Axi4Stream
               {tData = cf, tLast = s_axis_tlast, tKeep = s_axis_tkeep}
-        else Nothing
+        | otherwise = Nothing
 
-      ((nextKernel, nextAcc, _), cf) = if vld || m_axis_valid_and_ready
-        then serConv1D (kernel, acc, counter) (state, s_axis_tdata)
-        else ((kernel, acc, counter), 0)
+      nextState = 
+        case (state, s_axis_tlast) of
+          (LOAD_KERNEL, True) -> CONV -- only one transision once kernel loaded
+          _                   -> state
 
-      (nextState, nextCounter) =
-        case state of
-          LOAD_KERNEL -> if vld
-            then if counter == maxBound then (CONV, 0) else (state, counter')
-            else (state, counter)
-          CONV -> if vld || m_axis_tready
-            then if counter == maxBound then (CONV, 0) else (state, counter')
-            else (state, counter)
-          _ -> (LOAD_KERNEL, 0)
+      nextKernel =
+        case (state, vld) of
+          (LOAD_KERNEL, True) -> kernel <<+ s_axis_tdata -- load valid data into the kernel
+          _                   -> kernel
+
+      nextCounter
+        | not vld       = counter
+        | s_axis_tlast  = 0
+        | otherwise     = succ counter
+
+      nextAcc 
+        | state == LOAD_KERNEL  = 0
+        | (counter == 0)        = (kernel !! 0) * s_axis_tdata -- reset accumulator
+        | otherwise             = acc + (kernel !! counter) * s_axis_tdata -- add to accumulator
+
+      cf = nextAcc
 
    in ((nextState, nextKernel, nextAcc, nextCounter, s_axis_tkeep), (m_axis, s_axis_tready))
 
@@ -628,7 +632,7 @@ axisConv1DReuse (state, kernel, subImg, keep) (s_axis, m_axis_tready) =
       newKernel =
         case (state, vld) of
           (LOAD_KERNEL, True) -> kernel <<+ s_axis_tdata
-          _           -> kernel
+          _                   -> kernel
 
       -- Sub-image update (shift for LOAD_SUBIMG and CONV)
       newSubImg =
